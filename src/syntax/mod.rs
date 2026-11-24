@@ -79,6 +79,11 @@ pub(crate) fn render_markdown_enabled() -> bool {
     RENDER_MARKDOWN.get().copied().unwrap_or(false)
 }
 
+/// Width for bodies the caller does not pre-wrap (remote review threads and
+/// summaries): rows keep their full length, and the diff view's outer wrap
+/// pass, or truncation, fits them like any other annotation row.
+pub(crate) const UNWRAPPED: usize = usize::MAX;
+
 /// Rows [`SyntaxHighlighter::render_markdown_body`] lays `content` out in at
 /// `width`. Colours never change the layout, so no theme is needed.
 pub(crate) fn rendered_markdown_rows(content: &str, width: usize) -> usize {

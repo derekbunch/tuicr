@@ -455,12 +455,13 @@ pub fn format_remote_thread_lines(
             ]));
         }
 
-        for line in comment.body.split('\n') {
-            result.push(Line::from(vec![
-                Span::styled("    │  ".to_string(), border_style),
-                Span::styled(tabify(line), body_style),
-            ]));
-        }
+        result.extend(remote_body_lines(
+            theme,
+            &comment.body,
+            border_style,
+            body_style,
+            muted,
+        ));
 
         is_first = false;
     }
@@ -509,12 +510,13 @@ pub fn format_remote_review_summary_lines(
         Span::styled("─".repeat(28), border_style),
     ]));
 
-    for line in summary.body.split('\n') {
-        result.push(Line::from(vec![
-            Span::styled("    │  ".to_string(), border_style),
-            Span::styled(tabify(line), body_style),
-        ]));
-    }
+    result.extend(remote_body_lines(
+        theme,
+        &summary.body,
+        border_style,
+        body_style,
+        false,
+    ));
 
     result.push(Line::from(vec![Span::styled(
         "    ╰".to_string() + &"─".repeat(39),
@@ -522,6 +524,62 @@ pub fn format_remote_review_summary_lines(
     )]));
 
     result
+}
+
+/// Body rows of a remote thread comment or review summary, each behind the
+/// box's `│` border. These boxes are not pre-wrapped, so rendered markdown is
+/// laid out unwrapped; `remote_comments::body_rows` counts the same rows.
+/// `muted` (resolved or outdated threads) dims rendered rows to `body_style`.
+fn remote_body_lines(
+    theme: &Theme,
+    body: &str,
+    border_style: Style,
+    body_style: Style,
+    muted: bool,
+) -> Vec<Line<'static>> {
+    remote_body_lines_with(
+        theme,
+        body,
+        border_style,
+        body_style,
+        muted,
+        syntax::render_markdown_enabled(),
+    )
+}
+
+fn remote_body_lines_with(
+    theme: &Theme,
+    body: &str,
+    border_style: Style,
+    body_style: Style,
+    muted: bool,
+    rendered: bool,
+) -> Vec<Line<'static>> {
+    let border = || Span::styled("    │  ".to_string(), border_style);
+    if !rendered {
+        return body
+            .split('\n')
+            .map(|line| Line::from(vec![border(), Span::styled(tabify(line), body_style)]))
+            .collect();
+    }
+    theme
+        .syntax_highlighter()
+        .render_markdown_body(body, syntax::UNWRAPPED)
+        .into_iter()
+        .map(|row| {
+            let spans = row.into_iter().map(|(style, text)| {
+                Span::styled(
+                    text,
+                    if muted {
+                        style.patch(body_style)
+                    } else {
+                        style
+                    },
+                )
+            });
+            Line::from(std::iter::once(border()).chain(spans).collect::<Vec<_>>())
+        })
+        .collect()
 }
 
 fn forge_badge_label(kind: Option<ForgeKind>) -> &'static str {
@@ -1236,6 +1294,37 @@ mod tests {
                 "viewport_width {viewport_width}"
             );
         }
+    }
+
+    /// Remote boxes are counted by `remote_comments::body_rows`, which lays the
+    /// body out unwrapped; the rendered rows must match that count.
+    #[test]
+    fn rendered_remote_body_matches_unwrapped_row_count() {
+        let theme = test_theme();
+        let body = "<!-- bot -->\n\n### Changes\n\n<details>\n<summary>2 issues</summary>\n\n- **one**\n- two\n</details>";
+        let lines = remote_body_lines_with(
+            &theme,
+            body,
+            Style::default(),
+            Style::default(),
+            false,
+            true,
+        );
+        assert_eq!(
+            lines.len(),
+            syntax::rendered_markdown_rows(body, syntax::UNWRAPPED)
+        );
+        let text: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .skip(1)
+                    .map(|s| s.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(text, ["Changes", "", "2 issues", "", "• one", "• two"]);
     }
 
     #[test]

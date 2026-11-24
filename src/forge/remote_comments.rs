@@ -211,14 +211,14 @@ pub fn filter_threads(
 /// Layout (must match `ui::comment_panel::format_remote_thread_lines`):
 /// - 1 header line for the root comment (`╭─ [github @author] L42 ──`)
 /// - 1 separator line per reply (`├─ ↳ @author ──`)
-/// - 1 body line per `\n`-split line in each comment's body
+/// - [`body_rows`] body lines per comment
 /// - 1 footer line at the end of the thread (`╰────`)
 pub fn thread_display_comment_indices(thread: &RemoteReviewThread) -> Vec<usize> {
     let mut indices = Vec::new();
     for (comment_idx, comment) in thread.comments.iter().enumerate() {
         indices.extend(std::iter::repeat_n(
             comment_idx,
-            1 + comment.body.split('\n').count(),
+            1 + body_rows(&comment.body),
         ));
     }
     indices.push(thread.comments.len().saturating_sub(1));
@@ -236,10 +236,20 @@ pub fn thread_display_lines(thread: &RemoteReviewThread) -> usize {
 /// diff view's review-scope area. Layout must match
 /// `ui::comment_panel::format_remote_review_summary_lines`:
 /// - 1 header line (`├── [github @author commented] ──`)
-/// - 1 body line per `\n`-split line in the summary body
+/// - [`body_rows`] body lines
 /// - 1 footer line (`╰────`)
 pub fn summary_display_lines(summary: &RemoteReviewSummary) -> usize {
-    1 + summary.body.split('\n').count() + 1
+    1 + body_rows(&summary.body) + 1
+}
+
+/// Body rows of a remote comment or summary, matching
+/// `ui::comment_panel::remote_body_lines`: rendered markdown laid out
+/// unwrapped with `render_markdown`, one per `\n`-split source line otherwise.
+fn body_rows(body: &str) -> usize {
+    if crate::syntax::render_markdown_enabled() {
+        return crate::syntax::rendered_markdown_rows(body, crate::syntax::UNWRAPPED);
+    }
+    body.split('\n').count()
 }
 
 /// Group threads by file path for export grouping. Preserves the input

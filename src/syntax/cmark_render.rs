@@ -28,6 +28,9 @@ use crate::vcs::TAB_WIDTH;
 const QUOTE_BAR: &str = "│ ";
 const CELL_SEPARATOR: &str = " │ ";
 const HEADER_SEPARATOR: &str = "─┼─";
+/// Rules stop here, so a body rendered unwrapped (remote review comments) does
+/// not draw one as wide as `usize::MAX`.
+const RULE_MAX_WIDTH: usize = 80;
 
 /// Lay out `content` as rows at most `width` columns wide.
 ///
@@ -75,6 +78,49 @@ struct CodeBlock<'a> {
     text: String,
 }
 
+/// Raw HTML being reduced to its text; `html_action` says what each tag does.
+#[derive(Default)]
+struct HtmlState {
+    /// Inside an HTML block, whose blank lines are leftovers of dropped tags.
+    in_block: bool,
+    /// Inside a `<!-- -->` comment that has not closed yet.
+    in_comment: bool,
+    /// A tag cut off at the end of the previous HTML event.
+    carry: String,
+    /// Open styling tags, with the style-stack depth to restore on close.
+    open: Vec<(String, usize)>,
+}
+
+/// What a recognised HTML tag turns into. Unknown tags stay literal text, so a
+/// bare `Vec<T>` in prose is not swallowed.
+enum HtmlAction {
+    Style(fn(&MarkdownPalette) -> Style),
+    Break,
+    AltText,
+    Drop,
+    Literal,
+}
+
+/// The tags GitHub and its bots emit in review bodies (`<details>`,
+/// `<summary>`, `<picture>`, `<sub>`, ...), mapped to markdown equivalents.
+fn html_action(name: &str) -> HtmlAction {
+    match name {
+        "b" | "strong" | "summary" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            HtmlAction::Style(|p| p.bold.add_modifier(Modifier::BOLD))
+        }
+        "em" | "i" => HtmlAction::Style(|p| p.italic.add_modifier(Modifier::ITALIC)),
+        "code" | "kbd" | "samp" | "tt" => HtmlAction::Style(|p| p.code),
+        "del" | "s" | "strike" => {
+            HtmlAction::Style(|p| p.strike.add_modifier(Modifier::CROSSED_OUT))
+        }
+        "br" => HtmlAction::Break,
+        "img" => HtmlAction::AltText,
+        "a" | "abbr" | "details" | "div" | "hr" | "ins" | "mark" | "p" | "picture" | "small"
+        | "source" | "span" | "sub" | "sup" | "u" => HtmlAction::Drop,
+        _ => HtmlAction::Literal,
+    }
+}
+
 /// A table being collected: cells are inline spans, laid out at the end.
 struct Table {
     alignments: Vec<Alignment>,
@@ -100,6 +146,7 @@ struct MarkdownRenderer<'a> {
     gap: bool,
     code: Option<CodeBlock<'a>>,
     table: Option<Table>,
+    html: HtmlState,
 }
 
 impl<'a> MarkdownRenderer<'a> {
@@ -117,6 +164,7 @@ impl<'a> MarkdownRenderer<'a> {
             gap: false,
             code: None,
             table: None,
+            html: HtmlState::default(),
         }
     }
 
@@ -133,7 +181,8 @@ impl<'a> MarkdownRenderer<'a> {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => self.text(&text),
+            Event::Text(text) => self.text(&text),
+            Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
             Event::Code(code) | Event::InlineMath(code) | Event::DisplayMath(code) => {
                 let style = self.current_style().patch(self.palette.code);
                 self.push_inline(style, &code);
@@ -151,11 +200,16 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn start(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph | Tag::HtmlBlock | Tag::List(None) | Tag::List(Some(_)) => {
+            Tag::HtmlBlock => {
                 self.open_block();
-                if let Tag::List(start) = tag {
-                    self.lists.push(start);
-                }
+                self.html.in_block = true;
+            }
+            Tag::Paragraph => self.open_block(),
+            Tag::List(start) => {
+                self.open_block();
+                // Pay the owed blank row now: the first item clears it.
+                self.pay_gap();
+                self.lists.push(start);
             }
             Tag::Heading { .. } => {
                 self.open_block();
@@ -193,7 +247,11 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph | TagEnd::HtmlBlock => self.close_block(),
+            TagEnd::Paragraph => self.close_block(),
+            TagEnd::HtmlBlock => {
+                self.close_block();
+                self.html.in_block = false;
+            }
             TagEnd::Heading(_) => {
                 self.close_block();
                 self.styles.pop();
@@ -269,19 +327,116 @@ impl<'a> MarkdownRenderer<'a> {
         }
     }
 
-    // ---- blocks ----
+    // ---- HTML ----
 
-    /// Flush pending inline text and pay any owed blank row before a block.
-    fn open_block(&mut self) {
-        self.flush_inline();
-        if mem::take(&mut self.gap) && !self.rows.is_empty() {
-            let mut row = self.prefix(false);
-            trim_trailing_spaces(&mut row);
-            self.rows.push(row);
+    /// Reduce raw HTML to its text: tags act per `html_action`, comments go.
+    fn html(&mut self, html: &str) {
+        let buffer = mem::take(&mut self.html.carry) + html;
+        let mut rest = buffer.as_str();
+        loop {
+            if self.html.in_comment {
+                let Some(end) = rest.find("-->") else {
+                    return;
+                };
+                self.html.in_comment = false;
+                rest = &rest[end + "-->".len()..];
+                continue;
+            }
+            let Some(open) = rest.find('<') else {
+                self.html_text(rest);
+                return;
+            };
+            self.html_text(&rest[..open]);
+            rest = &rest[open..];
+            // Only `<` followed by a letter, `/` or `!` can start a tag.
+            match rest[1..].chars().next() {
+                None => {
+                    self.html.carry = rest.to_string();
+                    return;
+                }
+                Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!' => {}
+                Some(_) => {
+                    self.html_text("<");
+                    rest = &rest[1..];
+                    continue;
+                }
+            }
+            if let Some(after) = rest.strip_prefix("<!--") {
+                self.html.in_comment = true;
+                rest = after;
+                continue;
+            }
+            let Some(close) = rest.find('>') else {
+                self.html.carry = rest.to_string();
+                return;
+            };
+            self.html_tag(&rest[..=close]);
+            rest = &rest[close + 1..];
         }
     }
 
+    fn html_text(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.push_inline(self.current_style(), &decode_entities(text));
+        }
+    }
+
+    /// Apply one `<...>` tag.
+    fn html_tag(&mut self, tag: &str) {
+        let inner = tag[1..tag.len() - 1].trim_end_matches('/');
+        let (closing, inner) = inner
+            .strip_prefix('/')
+            .map_or((false, inner), |i| (true, i));
+        let name = inner
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        match html_action(&name) {
+            HtmlAction::Style(_) if closing => self.close_html_style(&name),
+            HtmlAction::Style(style_of) => {
+                let depth = self.styles.len();
+                self.push_style(style_of(self.palette));
+                self.html.open.push((name, depth));
+            }
+            HtmlAction::Break => self.push_inline(self.current_style(), "\n"),
+            HtmlAction::AltText => {
+                if let Some(alt) = attribute(inner, "alt").filter(|alt| !alt.is_empty()) {
+                    let style = self.current_style().add_modifier(Modifier::DIM);
+                    self.push_inline(style, &decode_entities(alt));
+                }
+            }
+            HtmlAction::Drop => {}
+            HtmlAction::Literal => self.push_inline(self.current_style(), tag),
+        }
+    }
+
+    /// Close the innermost open `name` tag, and anything opened inside it.
+    fn close_html_style(&mut self, name: &str) {
+        if let Some(index) = self.html.open.iter().rposition(|(open, _)| open == name) {
+            self.styles.truncate(self.html.open[index].1);
+            self.html.open.truncate(index);
+        }
+    }
+
+    // ---- blocks ----
+
+    /// Flush pending inline text before a block. The blank row a previous
+    /// block owes is paid by `emit`, so a block that draws nothing (an HTML
+    /// block of dropped tags) adds no extra spacing.
+    fn open_block(&mut self) {
+        self.flush_inline();
+    }
+
     fn close_block(&mut self) {
+        // A `<` that never closed was text, not a tag.
+        let carry = mem::take(&mut self.html.carry);
+        self.html_text(&carry);
+        // Styling tags do not outlive their block.
+        if let Some(&(_, depth)) = self.html.open.first() {
+            self.styles.truncate(depth);
+            self.html.open.clear();
+        }
         self.flush_inline();
         self.gap = true;
     }
@@ -392,7 +547,7 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn rule(&mut self) {
         self.open_block();
-        let width = self.available();
+        let width = self.available().min(RULE_MAX_WIDTH);
         self.emit(vec![(self.palette.quote, "─".repeat(width))]);
         self.gap = true;
     }
@@ -459,6 +614,9 @@ impl<'a> MarkdownRenderer<'a> {
         while lines.len() > 1 && lines.last().is_some_and(Vec::is_empty) {
             lines.pop();
         }
+        if self.html.in_block {
+            lines.retain(|line| line.iter().any(|(_, text)| !text.trim().is_empty()));
+        }
         let width = self.available();
         for line in lines {
             for row in wrap(&line, width, true) {
@@ -470,11 +628,21 @@ impl<'a> MarkdownRenderer<'a> {
     /// Push a row behind its container prefix. The first row after an item
     /// opens takes the item's marker; every later row gets blanks.
     fn emit(&mut self, content: HighlightedSpans) {
+        self.pay_gap();
         let mut row = self.prefix(true);
         for (style, text) in content {
             push_piece(&mut row, style, &text);
         }
         self.rows.push(row);
+    }
+
+    /// Push the blank row a previous block owes, if any.
+    fn pay_gap(&mut self) {
+        if mem::take(&mut self.gap) && !self.rows.is_empty() {
+            let mut gap = self.prefix(false);
+            trim_trailing_spaces(&mut gap);
+            self.rows.push(gap);
+        }
     }
 
     fn prefix(&mut self, take_markers: bool) -> HighlightedSpans {
@@ -528,6 +696,42 @@ fn alert_color(kind: BlockQuoteKind) -> Color {
         BlockQuoteKind::Warning => Color::Yellow,
         BlockQuoteKind::Caution => Color::Red,
     }
+}
+
+/// Value of attribute `name` in a tag's inner text, quoted or bare.
+fn attribute<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
+    let mut rest = tag;
+    while let Some(at) = rest.find(name) {
+        let after = &rest[at + name.len()..];
+        if rest[..at].ends_with(char::is_whitespace)
+            && let Some(value) = after.trim_start().strip_prefix('=')
+        {
+            let value = value.trim_start();
+            return match value.chars().next()? {
+                quote @ ('"' | '\'') => value[1..].split(quote).next(),
+                _ => value.split(char::is_whitespace).next(),
+            };
+        }
+        rest = after;
+    }
+    None
+}
+
+/// Decode the entities GitHub bodies use; `&amp;` last so it cannot double-decode.
+fn decode_entities(text: &str) -> String {
+    const ENTITIES: [(&str, &str); 6] = [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+    ];
+    ENTITIES
+        .iter()
+        .fold(text.to_string(), |text, (entity, plain)| {
+            text.replace(entity, plain)
+        })
 }
 
 fn expand_tabs(text: &str) -> String {
@@ -835,6 +1039,49 @@ mod tests {
     fn should_show_link_destination_unless_it_is_the_text() {
         assert_eq!(rows("[docs](https://x.y)", 80), ["docs (https://x.y)"]);
         assert_eq!(rows("<https://x.y>", 80), ["https://x.y"]);
+    }
+
+    /// The shape of a Copilot review summary: GitHub bots wrap markdown in HTML.
+    #[test]
+    fn should_reduce_github_html_to_its_text() {
+        let body = "<!-- ccr-overview-v2 -->\n\n### Changes\n\n<details open>\n<summary><strong>3 open issues</strong></summary>\n\n- <picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://x.y/d.svg\"><img alt=\"medium\" src=\"https://x.y/m.svg\"></picture> First issue\n</details>\n\n<sub>Review effort: Balanced</sub>";
+        assert_eq!(
+            rows(body, 80),
+            [
+                "Changes",
+                "",
+                "3 open issues",
+                "",
+                "• medium First issue",
+                "",
+                "Review effort: Balanced"
+            ]
+        );
+        let title = &styled(body, 80)[2];
+        assert!(
+            title[0].0.add_modifier.contains(Modifier::BOLD),
+            "{title:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_unknown_tags_and_stray_brackets_as_text() {
+        assert_eq!(rows("Use Vec<T> here", 80), ["Use Vec<T> here"]);
+        assert_eq!(rows("a<br>b &amp; c", 80), ["a", "b & c"]);
+        assert_eq!(rows("<div>\nx < y\n</div>", 80), ["x < y"]);
+    }
+
+    #[test]
+    fn should_drop_multi_line_html_comments() {
+        assert_eq!(rows("<!--\nhidden\n-->\n\nshown", 80), ["shown"]);
+    }
+
+    #[test]
+    fn should_cap_rules_when_unwrapped() {
+        assert_eq!(
+            rows("a\n\n---\n\nb", usize::MAX)[2].chars().count(),
+            RULE_MAX_WIDTH
+        );
     }
 
     #[test]
