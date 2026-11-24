@@ -265,6 +265,7 @@ pub struct AppConfig {
     pub ignore_whitespace_overrides: BTreeMap<String, bool>,
     pub include_untracked: Option<bool>,
     pub staged_markers: Option<bool>,
+    pub render_markdown: Option<bool>,
     pub wrap: Option<bool>,
     /// Where wrapped unified diff rows continue: `"flow"` (the default) or
     /// `"gutter"`.
@@ -370,6 +371,7 @@ const KNOWN_KEYS: &[&str] = &[
     "ignore_whitespace_overrides",
     "include_untracked",
     "staged_markers",
+    "render_markdown",
     "wrap",
     "wrap_style",
     "relative_line_numbers",
@@ -817,6 +819,7 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         ignore_whitespace_overrides,
         include_untracked: read_bool(table, "include_untracked", &mut warnings),
         staged_markers: read_bool(table, "staged_markers", &mut warnings),
+        render_markdown: read_bool(table, "render_markdown", &mut warnings),
         wrap: read_bool(table, "wrap", &mut warnings),
         wrap_style: read_enum(table, "wrap_style", &["flow", "gutter"], &mut warnings),
         export_legend: read_bool(table, "export_legend", &mut warnings),
@@ -2086,6 +2089,18 @@ mod tests {
             let outcome = parse_config(&format!("staged_markers = {enabled}\n"));
             assert_eq!(
                 outcome.config.and_then(|cfg| cfg.staged_markers),
+                Some(enabled)
+            );
+            assert!(outcome.warnings.is_empty());
+        }
+    }
+
+    #[test]
+    fn should_parse_render_markdown() {
+        for enabled in [false, true] {
+            let outcome = parse_config(&format!("render_markdown = {enabled}\n"));
+            assert_eq!(
+                outcome.config.and_then(|cfg| cfg.render_markdown),
                 Some(enabled)
             );
             assert!(outcome.warnings.is_empty());

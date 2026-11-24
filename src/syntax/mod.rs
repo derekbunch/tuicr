@@ -1,4 +1,5 @@
 mod cmark;
+mod cmark_render;
 
 use ratatui::style::{Color, Modifier, Style};
 use std::path::Path;
@@ -61,6 +62,27 @@ fn cap_oniguruma_retry_limit() {
             onig_set_retry_limit_in_match(ONIGURUMA_RETRY_LIMIT);
         }
     });
+}
+
+/// The `render_markdown` config key, set by [`set_render_markdown`].
+static RENDER_MARKDOWN: OnceLock<bool> = OnceLock::new();
+
+/// Render comment bodies and the PR description as formatted markdown instead
+/// of highlighted source. Call once at startup, before the first frame: comment
+/// heights and comment rendering both read it, and must agree for the whole run.
+pub fn set_render_markdown(enabled: bool) {
+    let _ = RENDER_MARKDOWN.set(enabled);
+}
+
+/// Whether [`set_render_markdown`] turned rendered markdown on.
+pub(crate) fn render_markdown_enabled() -> bool {
+    RENDER_MARKDOWN.get().copied().unwrap_or(false)
+}
+
+/// Rows [`SyntaxHighlighter::render_markdown_body`] lays `content` out in at
+/// `width`. Colours never change the layout, so no theme is needed.
+pub(crate) fn rendered_markdown_rows(content: &str, width: usize) -> usize {
+    cmark_render::render(None, content, width).len()
 }
 
 /// The embedded grammars plus any loaded by [`load_user_syntaxes`].
@@ -281,6 +303,17 @@ impl SyntaxHighlighter {
     /// syntect for their contents.
     pub(crate) fn highlight_markdown_body(&self, content: &str) -> HighlightedLines {
         cmark::highlight(self, content)
+    }
+
+    /// Lay a review comment body or PR description out as rendered markdown:
+    /// markers dropped, lists, quotes, alerts and tables formatted, prose
+    /// word-wrapped. Returns final rows, each at most `width` columns.
+    pub(crate) fn render_markdown_body(
+        &self,
+        content: &str,
+        width: usize,
+    ) -> Vec<HighlightedSpans> {
+        cmark_render::render(Some(self), content, width)
     }
 
     /// Run syntect line-by-line against a resolved syntax, converting to

@@ -149,6 +149,13 @@ fn main() -> anyhow::Result<()> {
             syntax::load_user_syntaxes(&dir)
         }));
     }
+    syntax::set_render_markdown(
+        config_outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.render_markdown)
+            .unwrap_or(false),
+    );
 
     let transparent = config_outcome
         .config

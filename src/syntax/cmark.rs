@@ -30,16 +30,19 @@ use super::{HighlightedLines, SyntaxHighlighter};
 /// Resolved at construction rather than per call: building a `Highlighter` and
 /// walking the theme's selectors for nine scopes is small but strictly wasted
 /// work on a path that runs for every comment on every frame.
+///
+/// `Default` is the unstyled palette `cmark_render` counts rows with.
+#[derive(Default)]
 pub(super) struct MarkdownPalette {
-    base: Style,
-    heading: Style,
-    bold: Style,
-    italic: Style,
-    code: Style,
-    link: Style,
-    quote: Style,
-    list: Style,
-    strike: Style,
+    pub(super) base: Style,
+    pub(super) heading: Style,
+    pub(super) bold: Style,
+    pub(super) italic: Style,
+    pub(super) code: Style,
+    pub(super) link: Style,
+    pub(super) quote: Style,
+    pub(super) list: Style,
+    pub(super) strike: Style,
 }
 
 impl MarkdownPalette {

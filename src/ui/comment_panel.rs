@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::App;
 use crate::forge::traits::ForgeKind;
 use crate::model::LineRange;
+use crate::syntax;
 use crate::theme::Theme;
 use crate::ui::styles;
 use crate::vcs::{TAB_WIDTH, tabify};
@@ -73,8 +74,15 @@ pub(crate) fn wrap_segments(text: &str, content_area: usize) -> Vec<&str> {
 /// bottom border) at `viewport_width`. Shared by local and PR issue comments
 /// so the annotation counters match `format_comment_lines`.
 pub(crate) fn comment_box_rows(body: &str, viewport_width: usize) -> usize {
+    comment_box_rows_with(body, viewport_width, syntax::render_markdown_enabled())
+}
+
+fn comment_box_rows_with(body: &str, viewport_width: usize, rendered: bool) -> usize {
     // indicator(1) + border_prefix(7) + safety_margin(2) = 10
     let content_area = viewport_width.saturating_sub(10);
+    if rendered {
+        return 2 + syntax::rendered_markdown_rows(body, content_area);
+    }
     let visual_lines: usize = body
         .split('\n')
         .map(|line| wrap_segments(line, content_area).len())
@@ -528,13 +536,42 @@ fn forge_badge_label(kind: Option<ForgeKind>) -> &'static str {
     }
 }
 
-/// Render `content` as markdown-highlighted, pre-wrapped lines. Colors come
-/// from the active syntect theme.
+/// Render `content` as pre-wrapped lines: formatted markdown with
+/// `render_markdown`, markdown-highlighted source otherwise. Colors come from
+/// the active syntect theme. `comment_box_rows` counts the same rows.
 pub(crate) fn markdown_body_lines(
     theme: &Theme,
     content: &str,
     content_area: usize,
 ) -> Vec<Line<'static>> {
+    markdown_body_lines_with(
+        theme,
+        content,
+        content_area,
+        syntax::render_markdown_enabled(),
+    )
+}
+
+fn markdown_body_lines_with(
+    theme: &Theme,
+    content: &str,
+    content_area: usize,
+    rendered: bool,
+) -> Vec<Line<'static>> {
+    if rendered {
+        return theme
+            .syntax_highlighter()
+            .render_markdown_body(content, content_area)
+            .into_iter()
+            .map(|row| {
+                Line::from(
+                    row.into_iter()
+                        .map(|(style, text)| Span::styled(text, style))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+    }
     let lines: Vec<&str> = content.split('\n').collect();
     // Highlight the body as a whole so multi-line constructs (e.g. fenced code)
     // carry state across lines.
@@ -1181,6 +1218,24 @@ mod tests {
             true,
         )
         .0
+    }
+
+    /// With `render_markdown`, heights come from the rendered layout, which
+    /// differs from the source line count; the annotation counters must still
+    /// match the rows `format_comment_lines` draws.
+    #[test]
+    fn rendered_box_rows_match_rendered_body_lines() {
+        let theme = test_theme();
+        let body = "Use **bold** here\n- first item\n- second item that wraps around the box\n\n| Key | Value |\n| --- | --- |\n| a | 1 |\n\n> [!WARNING]\n> Mind the gap";
+        for viewport_width in [20, 40, 120] {
+            let content_area = viewport_width - 10;
+            let body_lines = markdown_body_lines_with(&theme, body, content_area, true);
+            assert_eq!(
+                comment_box_rows_with(body, viewport_width, true),
+                2 + body_lines.len(),
+                "viewport_width {viewport_width}"
+            );
+        }
     }
 
     #[test]

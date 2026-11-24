@@ -46,6 +46,7 @@ editor = "nvim"
 comment_vim = false
 q_quits = false
 comment_tab_width = 4
+render_markdown = false
 wrap = false
 wrap_style = "flow"
 export_legend = true # superseded by [export].legend
@@ -134,6 +135,7 @@ count = true
 | `editor`                   | `$EDITOR`    | Editor command for the `e` / `:edit` handoff, split with shell-like quoting rules (e.g. `"code -w"`). Falls back to `$EDITOR`, then `vi`. |
 | `comment_vim`              | `false`      | Vim modal editing in the comment box; toggle at runtime with `:vim`. When off, default emacs/readline bindings.                                            |
 | `q_quits`                  | `false`      | Restore bare `q` as a quit key in review modes. `:q`, `ZZ`, and `ZQ` work regardless of this setting.                                                     |
+| `render_markdown`          | `false`      | Show comment bodies and the PR description as rendered markdown: markers hidden, lists bulleted, quotes and GitHub alerts (`> [!NOTE]`) barred, tables laid out in columns, code blocks highlighted. Line breaks are kept, as in GitHub comments. The comment editor still shows the source. |
 | `comment_tab_width`        | `4`          | Spaces inserted by Tab while typing in the vim comment box (Insert mode).                                                                                  |
 | `wrap`                     | `false`      | Line wrap in the diff view. Toggle with `:set wrap!`.                                                                                                      |
 | `wrap_style`               | `flow`       | Where wrapped unified diff rows continue: `flow` wraps from the left edge, `gutter` keeps wrapped content after the line-number gutter, leaving continuation rows without a line number or change bar. |
